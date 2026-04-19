@@ -228,7 +228,8 @@ impl RaftNodeFacade {
                     "light ready committed entries",
                 )?;
                 let light_messages = light_ready.take_messages();
-                inner.raw_node.advance_apply_to(inner.applied_index);
+                let applied_index = inner.applied_index;
+                inner.raw_node.advance_apply_to(applied_index);
 
                 let mut all_outbound = outbound_messages;
                 all_outbound.extend(light_messages);

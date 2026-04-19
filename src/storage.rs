@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
-use prost::Message;
+use protobuf::Message;
 use raft::GetEntriesContext;
 use raft::Result as RaftResult;
 use raft::Storage;
@@ -110,8 +110,8 @@ impl MetaStorage {
         let mut metadata = SnapshotMetadata::default();
         metadata.index = index;
         metadata.term = term;
-        metadata.conf_state = self.conf_state();
-        snapshot.metadata = protobuf::MessageField::some(metadata);
+        metadata.conf_state = protobuf::SingularPtrField::some(self.conf_state());
+        snapshot.metadata = protobuf::SingularPtrField::some(metadata);
         snapshot.data = data.into();
         self.install_snapshot(snapshot);
     }
