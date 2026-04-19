@@ -1,0 +1,80 @@
+一、 核心架构目标 (喂给 Agent 的核心上下文)
+你要构建的是一个名为 MetaServer 的组件。
+职责：作为整个存算分离架构（Tablet Cache Server + WAL Server）的“大脑”。
+高可用基石：由 3 台（或 5 台）独立的机器组成一个强一致的 Raft Group。
+状态机（State Machine）：它内部的内存状态机只保存极其精简的集群拓扑（Topology）和数据路由表（Routing Table）。
+网络通信：通过 gRPC（tonic）或自定义的二进制异步 RPC 暴露接口给 Cache/WAL Server 和 Client。
+二、 核心数据结构定义 (State Machine)
+在向 Agent 下达指令前，必须先定义好你要调度的“资产”长什么样。
+1. 节点信息 (Node / Server Info)
+记录底层干活的机器状态。
+code
+Rust
+// 伪代码，让 Agent 知道我们需要什么
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ServerNode {
+    pub node_id: u64,
+    pub address: String, // 例如 "192.168.1.10:8000"
+    pub role: ServerRole, // Enum: CacheServer | WalServer
+    pub state: NodeState, // Enum: Up | Down | Tombstone
+    pub last_heartbeat_ts: u64,
+}
+2. 数据分片路由 (Tablet Routing)
+记录业务数据（Tablet）到底存在哪。
+code
+Rust
+#[derive(Clone, Serialize, Deserialize)]
+pub struct TabletRoute {
+    pub tablet_id: u64,
+    // 当前负责读写该 Tablet 的 Cache Server ID
+    pub leader_cache_node_id: u64,
+    // 该 Tablet 的持久化数据存放在哪几个 WAL Server 上（通常 3 个副本）
+    pub wal_replica_node_ids: Vec<u64>,
+    // 极其重要：版本号/Epoch，防止网络分区导致的脑裂
+    pub epoch: u64, 
+}
+三、 使用 raft-rs 的正确姿势 (Agent 指令拆解)
+raft-rs 只是一个纯粹的算法库（它连网络和存储都不包），你需要指导 Agent 把它嵌进你的异步运行时（tokio）中。
+你需要让 Agent 生成以下三个核心模块：
+模块 1：Raft Storage (存储层)
+指令：请实现 raft::Storage trait。
+要求：
+内存缓存 (MemTable)：必须在内存中缓存最近的 Raft Log Entries、HardState（当前的 Term 和 Vote 记录）以及 Snapshot（快照）。
+持久化落盘 (WAL for Meta)：Raft 的每一条状态变更日志（比如新增了一个 Tablet），必须被异步且安全地追加写入到 MetaServer 本地的磁盘上。
+提示 Agent：可以使用 RocksDB 或者你自己写的简单的 Append-Only File 来持久化 Raft Log。
+模块 2：Raft Network (传输层)
+指令：请基于 tonic (gRPC) 或底层的 TCP 异步流实现 Raft 节点之间的点对点通信。
+要求：
+需要暴露一个 gRPC 接口，接收并处理 raft::eraftpb::Message。
+需要一个后台发送队列，异步地将本节点的 Raft Message 发送给另外两台 MetaServer。
+模块 3：The State Machine (业务状态机)
+指令：请实现一个业务状态机（通常是一个用 RwLock 保护的 HashMap 集合），并编写 apply_log 逻辑。
+要求：
+当 Raft 内部判定一条日志（比如 Log: Assign Tablet 100 to CacheNode 5）已经被多数派（Quorum）确认（Committed）后。
+触发回调，把这条日志应用（Apply）到状态机中：更新内存里的 TabletRoute 路由表。
+四、 MetaServer 对外暴露的核心 RPC 接口
+当 MetaServer 内部通过 Raft 达成一致后，它需要指挥外面的兄弟干活。你需要让 Agent 生成以下关键的 gRPC 接口（定义在 .proto 文件中）：
+1. 供 Cache Server 和 WAL Server 调用的接口
+Heartbeat(NodeInfo) -> HeartbeatResponse
+作用：底层节点每隔 3 秒调用一次，汇报自己的存活状态和负载情况（CPU、内存、磁盘剩余空间）。
+MetaServer 行为：如果是新的节点，通过 Raft 提议（Propose）将其加入集群；更新最后心跳时间。
+2. 供 Client (客户端) 调用的接口
+GetTabletRoute(TabletID) -> RouteResponse
+作用：客户端想读写 Tablet_100 时，先来问大脑。
+MetaServer 行为：直接从内存的状态机（路由表）中读取最新的 leader_cache_node_id 和 epoch，瞬间返回。（注意：读请求不需要走 Raft 提议，直接读 Leader 内存即可，这叫 ReadIndex 或 LeaseRead 优化，极其关键！）
+3. 核心大招：调度指令 (Scheduler Callbacks)
+这是 MetaServer 主动向底层节点下发的指令（通常作为 Heartbeat 的 Response 捎带回去，或者建立长连接推送）。
+场景：MetaServer 发现 CacheNode_1 的 CPU 已经 99% 了，决定把它身上的 Tablet_100 迁走，调度给比较闲的 CacheNode_2。
+动作序列 (极度考验一致性)：
+MetaServer 提议一条 Raft Log：Update Tablet_100 Epoch from V1 to V2, Leader from Node_1 to None。
+等待日志 Commit。
+MetaServer 向 CacheNode_1 下发指令：Drop Tablet_100 (Epoch V1)。Node_1 立刻停止接收客户端对该 Tablet 的请求。
+MetaServer 向 CacheNode_2 下发指令：Load Tablet_100 from WAL Servers [A,B,C]。
+Node_2 从 WAL 恢复完数据进内存后，回复 MetaServer Ready。
+MetaServer 再次提议 Raft Log：Update Tablet_100 Epoch from V2 to V3, Leader is Node_2。
+客户端此时再来查路由，就会被引导向新的 Node_2。
+五、 喂给 Agent 的“避坑防雷”提示词
+在使用 Agent 写这段代码时，务必在 Prompt 里加上这几条严苛的约束，否则生成的代码在线上绝对会死锁或脑裂：
+防脑裂 (Lease / Epoch 机制)：告诉 Agent，“在生成的路由表中，所有的 Tablet 分配必须带上严格递增的 Epoch (版本号)。客户端拿着路由去写 Cache Server 时必须带上 Epoch。Cache Server 必须拒绝所有 Epoch 小于自己当前状态的读写请求。”
+读优化 (ReadIndex)：告诉 Agent，“对于 GetTabletRoute 这个极其高频的只读接口，必须实现 ReadIndex 机制。即 Leader 节点在返回路由前，必须向多数派发送一次轻量级心跳，确认自己仍然是合法的 Leader，防止由于网络分区导致旧 Leader 返回了陈旧（Stale）的路由信息。”
+单向心跳驱动 (Heartbeat-Driven Scheduling)：告诉 Agent，“MetaServer 不要主动去连接底层的 Cache/WAL 节点（因为可能存在防火墙或 NAT）。所有的调度指令，都必须封装在底层节点主动发来的心跳响应（Heartbeat Response）中带下去。”

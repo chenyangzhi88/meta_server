@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+package meta;
+
+message NodeInfo {
+  uint64 node_id = 1;
+  string address = 2;
+  string role = 3;
+  string state = 4;
+  uint64 last_heartbeat_ts = 5;
+  double cpu_usage = 6;
+  double memory_usage = 7;
+  double disk_free_gb = 8;
+}
+
+message SchedulerCommand {
+  string kind = 1;
+  uint64 tablet_id = 2;
+  uint64 epoch = 3;
+  repeated uint64 wal_replica_node_ids = 4;
+  string detail = 5;
+}
+
+message HeartbeatRequest {
+  NodeInfo node = 1;
+}
+
+message HeartbeatResponse {
+  bool accepted = 1;
+  string leader_hint = 2;
+  repeated SchedulerCommand commands = 3;
+}
+
+message GetTabletRouteRequest {
+  uint64 tablet_id = 1;
+}
+
+message TabletRoute {
+  uint64 tablet_id = 1;
+  uint64 leader_cache_node_id = 2;
+  repeated uint64 wal_replica_node_ids = 3;
+  uint64 epoch = 4;
+}
+
+message GetTabletRouteResponse {
+  bool found = 1;
+  TabletRoute route = 2;
+  string leader_hint = 3;
+}
+
+message RaftMessage {
+  bytes data = 1;
+}
+
+message RaftMessageAck {
+  bool accepted = 1;
+}
+
+service MetaService {
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc GetTabletRoute(GetTabletRouteRequest) returns (GetTabletRouteResponse);
+}
+
+service RaftTransport {
+  rpc SendRaftMessage(RaftMessage) returns (RaftMessageAck);
+}
