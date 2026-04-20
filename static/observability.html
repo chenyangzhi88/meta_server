@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Meta Server Observatory</title>
+    <style>
+      :root {
+        --ink: #14213d;
+        --muted: #5c6b82;
+        --line: rgba(20, 33, 61, 0.12);
+        --paper: #fbf8f1;
+        --panel: rgba(255, 255, 255, 0.82);
+        --accent: #ef476f;
+        --accent-soft: rgba(239, 71, 111, 0.12);
+        --good: #2a9d8f;
+        --warn: #f4a261;
+        --bad: #d62828;
+        --shadow: 0 24px 60px rgba(20, 33, 61, 0.12);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(239, 71, 111, 0.16), transparent 28%),
+          radial-gradient(circle at top right, rgba(244, 162, 97, 0.18), transparent 32%),
+          linear-gradient(180deg, #f7f2e8 0%, var(--paper) 48%, #f0ebe1 100%);
+      }
+
+      .shell {
+        max-width: 1480px;
+        margin: 0 auto;
+        padding: 32px 20px 48px;
+      }
+
+      .hero,
+      .panel {
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background:
+          linear-gradient(135deg, rgba(255, 255, 255, 0.9), rgba(255, 248, 240, 0.92)),
+          var(--panel);
+        box-shadow: var(--shadow);
+        backdrop-filter: blur(12px);
+      }
+
+      .hero {
+        display: grid;
+        gap: 18px;
+        padding: 28px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        width: fit-content;
+        padding: 8px 14px;
+        border-radius: 999px;
+        background: var(--accent-soft);
+        color: var(--accent);
+        font-size: 13px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      h1 {
+        margin: 0;
+        font-family: "IBM Plex Serif", Georgia, serif;
+        font-size: clamp(2.2rem, 4vw, 4.2rem);
+        line-height: 0.98;
+      }
+
+      .hero-copy,
+      .caption,
+      .footer-note {
+        color: var(--muted);
+      }
+
+      .hero-copy {
+        max-width: 760px;
+        font-size: 1rem;
+        line-height: 1.6;
+      }
+
+      .hero-bar,
+      .filter-bar,
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        justify-content: space-between;
+      }
+
+      .status-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .pill {
+        padding: 9px 14px;
+        border-radius: 999px;
+        background: rgba(20, 33, 61, 0.06);
+        color: var(--ink);
+        font-size: 14px;
+      }
+
+      .pill strong {
+        margin-right: 6px;
+      }
+
+      button,
+      select,
+      input {
+        font: inherit;
+      }
+
+      button {
+        border: 0;
+        border-radius: 999px;
+        padding: 11px 18px;
+        cursor: pointer;
+        transition: transform 140ms ease, opacity 140ms ease;
+      }
+
+      button:hover {
+        transform: translateY(-1px);
+      }
+
+      .primary {
+        color: white;
+        background: linear-gradient(135deg, #ef476f, #d62828);
+      }
+
+      .ghost {
+        color: var(--ink);
+        background: rgba(20, 33, 61, 0.08);
+      }
+
+      .danger {
+        color: white;
+        background: linear-gradient(135deg, #d62828, #9d0208);
+      }
+
+      .success {
+        color: white;
+        background: linear-gradient(135deg, #2a9d8f, #1d6f64);
+      }
+
+      .mini {
+        padding: 7px 12px;
+        font-size: 0.86rem;
+      }
+
+      .grid {
+        display: grid;
+        gap: 18px;
+        margin-top: 20px;
+      }
+
+      .grid.two {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .panel {
+        padding: 20px;
+      }
+
+      .panel h2 {
+        margin: 0 0 6px;
+        font-family: "IBM Plex Serif", Georgia, serif;
+        font-size: 1.4rem;
+      }
+
+      .panel .caption {
+        margin: 0 0 16px;
+        font-size: 0.94rem;
+      }
+
+      .cards {
+        display: grid;
+        gap: 12px;
+      }
+
+      .cards.nodes {
+        grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      }
+
+      .card {
+        border: 1px solid rgba(20, 33, 61, 0.08);
+        border-radius: 18px;
+        padding: 16px;
+        background: rgba(255, 255, 255, 0.74);
+      }
+
+      .card header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 10px;
+      }
+
+      .card header strong {
+        font-size: 1.05rem;
+      }
+
+      .badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .badge.good {
+        color: var(--good);
+        background: rgba(42, 157, 143, 0.12);
+      }
+
+      .badge.warn {
+        color: #9c5d08;
+        background: rgba(244, 162, 97, 0.16);
+      }
+
+      .badge.bad {
+        color: var(--bad);
+        background: rgba(214, 40, 40, 0.12);
+      }
+
+      .statline {
+        display: grid;
+        gap: 8px;
+        color: var(--muted);
+        font-size: 0.92rem;
+      }
+
+      .statline span strong {
+        color: var(--ink);
+      }
+
+      table {
+        width: 100%;
+        border-collapse: collapse;
+      }
+
+      th,
+      td {
+        padding: 12px 10px;
+        text-align: left;
+        border-bottom: 1px solid rgba(20, 33, 61, 0.08);
+        vertical-align: top;
+      }
+
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+      }
+
+      .mono {
+        font-family: "IBM Plex Mono", "SFMono-Regular", monospace;
+      }
+
+      .alert-list {
+        display: grid;
+        gap: 12px;
+      }
+
+      .alert {
+        display: grid;
+        gap: 10px;
+        border-left: 4px solid var(--bad);
+        border-radius: 16px;
+        padding: 14px 16px;
+        background: rgba(214, 40, 40, 0.08);
+      }
+
+      .empty {
+        padding: 18px;
+        border-radius: 16px;
+        background: rgba(42, 157, 143, 0.08);
+        color: var(--good);
+      }
+
+      .filters {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+
+      .filters input,
+      .filters select {
+        min-width: 180px;
+        padding: 10px 14px;
+        border: 1px solid rgba(20, 33, 61, 0.16);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.88);
+        color: var(--ink);
+      }
+
+      .muted-inline {
+        color: var(--muted);
+        font-size: 0.9rem;
+      }
+
+      @media (max-width: 980px) {
+        .grid.two {
+          grid-template-columns: 1fr;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="shell">
+      <section class="hero">
+        <span class="eyebrow">Meta Server Observatory</span>
+        <h1>Control Plane Visibility Without Extra Tooling</h1>
+        <p class="hero-copy">
+          This panel reads the built-in HTTP observability gateway and shows live
+          cluster state: nodes, tablet routes, scheduler commands, operator alerts,
+          and per-node tablet ownership. It also exposes lightweight manual actions
+          for alert cleanup and failed load retries.
+        </p>
+        <div class="hero-bar">
+          <div class="status-row">
+            <span class="pill"><strong>Leader Hint</strong><span id="leaderHint">loading</span></span>
+            <span class="pill"><strong>Last Refresh</strong><span id="lastRefresh">waiting</span></span>
+            <span class="pill"><strong>Node Focus</strong><span id="nodeFocus">11</span></span>
+          </div>
+          <div class="actions">
+            <button class="ghost" id="toggleAuto">Auto Refresh: On</button>
+            <button class="primary" id="refresh">Refresh Now</button>
+          </div>
+        </div>
+        <div class="filter-bar">
+          <div class="filters">
+            <input id="tabletSearch" type="search" placeholder="Search tablet id" />
+            <select id="nodeStateFilter">
+              <option value="All">All Node States</option>
+              <option value="Up">Up</option>
+              <option value="Down">Down</option>
+              <option value="Tombstone">Tombstone</option>
+            </select>
+            <select id="routeStateFilter">
+              <option value="All">All Route States</option>
+              <option value="Assigned">Leader Assigned</option>
+              <option value="Unassigned">Leader Unassigned</option>
+            </select>
+            <select id="commandStatusFilter">
+              <option value="All">All Command States</option>
+              <option value="Pending">Pending</option>
+              <option value="Acked">Acked</option>
+              <option value="Completed">Completed</option>
+              <option value="Failed">Failed</option>
+            </select>
+          </div>
+          <div class="muted-inline" id="actionStatus">No pending manual action.</div>
+        </div>
+      </section>
+
+      <div class="grid" style="margin-top: 22px;">
+        <section class="panel">
+          <h2>Meta Cluster</h2>
+          <p class="caption">Raft members that host the meta service itself, including current leader/follower role and basic gRPC reachability.</p>
+          <div class="cards nodes" id="metaCluster"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Nodes</h2>
+          <p class="caption">Cluster node inventory, heartbeat freshness, role, and basic resource indicators.</p>
+          <div class="cards nodes" id="nodes"></div>
+        </section>
+      </div>
+
+      <div class="grid two">
+        <section class="panel">
+          <h2>Tablet Routes</h2>
+          <p class="caption">Current routing view for every tablet known to the meta service.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>Tablet</th>
+                <th>Leader Cache</th>
+                <th>WAL Replicas</th>
+                <th>Epoch</th>
+              </tr>
+            </thead>
+            <tbody id="routes"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Node Tablets</h2>
+          <p class="caption">View a node's route ownership and scheduled tablet work.</p>
+          <div class="actions" style="margin-bottom: 14px;">
+            <button class="ghost" id="prevNode">Previous Node</button>
+            <button class="ghost" id="nextNode">Next Node</button>
+          </div>
+          <table>
+            <thead>
+              <tr>
+                <th>Tablet</th>
+                <th>Relation</th>
+                <th>Epoch</th>
+              </tr>
+            </thead>
+            <tbody id="nodeTablets"></tbody>
+          </table>
+        </section>
+      </div>
+
+      <div class="grid two">
+        <section class="panel">
+          <h2>Scheduler Commands</h2>
+          <p class="caption">Command lifecycle across Pending, Acked, Completed, and Failed.</p>
+          <table>
+            <thead>
+              <tr>
+                <th>Command</th>
+                <th>Status</th>
+                <th>Target</th>
+                <th>Tablet</th>
+                <th>Kind</th>
+                <th>Detail</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="commands"></tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <h2>Operator Alerts</h2>
+          <p class="caption">Failures that require manual intervention instead of automatic retry.</p>
+          <div class="alert-list" id="alerts"></div>
+          <div class="footer-note" id="alertCount"></div>
+        </section>
+      </div>
+    </div>
+
+    <script>
+      let autoRefresh = true;
+      let refreshTimer = null;
+      let focusNodeId = 11;
+      let knownNodeIds = [];
+      let dataset = {
+        nodes: [],
+        routes: [],
+        commands: [],
+        alerts: [],
+        nodeTablets: [],
+        metaCluster: [],
+      };
+      let lastMetaClusterError = "";
+      let lastNodesError = "";
+      let lastRoutesError = "";
+      let lastCommandsError = "";
+      let lastAlertsError = "";
+      let lastNodeTabletsError = "";
+
+      const leaderHintEl = document.getElementById("leaderHint");
+      const lastRefreshEl = document.getElementById("lastRefresh");
+      const nodeFocusEl = document.getElementById("nodeFocus");
+      const actionStatusEl = document.getElementById("actionStatus");
+      const searchEl = document.getElementById("tabletSearch");
+      const nodeStateFilterEl = document.getElementById("nodeStateFilter");
+      const routeStateFilterEl = document.getElementById("routeStateFilter");
+      const commandStatusFilterEl = document.getElementById("commandStatusFilter");
+
+      document.getElementById("refresh").addEventListener("click", refreshAll);
+      document.getElementById("toggleAuto").addEventListener("click", () => {
+        autoRefresh = !autoRefresh;
+        document.getElementById("toggleAuto").textContent = `Auto Refresh: ${autoRefresh ? "On" : "Off"}`;
+        scheduleRefresh();
+      });
+      document.getElementById("prevNode").addEventListener("click", () => rotateNode(-1));
+      document.getElementById("nextNode").addEventListener("click", () => rotateNode(1));
+      searchEl.addEventListener("input", renderAll);
+      nodeStateFilterEl.addEventListener("change", renderAll);
+      routeStateFilterEl.addEventListener("change", renderAll);
+      commandStatusFilterEl.addEventListener("change", renderAll);
+
+      function scheduleRefresh() {
+        if (refreshTimer) {
+          clearInterval(refreshTimer);
+          refreshTimer = null;
+        }
+        if (autoRefresh) {
+          refreshTimer = setInterval(refreshAll, 4000);
+        }
+      }
+
+      function tabletSearchValue() {
+        return searchEl.value.trim();
+      }
+
+      function matchesTablet(tabletId) {
+        const query = tabletSearchValue();
+        if (!query) {
+          return true;
+        }
+        return String(tabletId).includes(query);
+      }
+
+      function rotateNode(direction) {
+        if (knownNodeIds.length === 0) {
+          return;
+        }
+        const currentIndex = Math.max(0, knownNodeIds.indexOf(focusNodeId));
+        const nextIndex = (currentIndex + direction + knownNodeIds.length) % knownNodeIds.length;
+        focusNodeId = knownNodeIds[nextIndex];
+        nodeFocusEl.textContent = focusNodeId;
+        renderNodeTablets();
+      }
+
+      async function fetchJson(url, options = {}) {
+        const response = await fetch(url, options);
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.error || `request failed: ${response.status}`);
+        }
+        return payload;
+      }
+
+      async function runAction(label, action) {
+        actionStatusEl.textContent = `${label}...`;
+        try {
+          const result = await action();
+          actionStatusEl.textContent = result.data.message || `${label} finished`;
+          await refreshAll();
+        } catch (error) {
+          actionStatusEl.textContent = error.message;
+        }
+      }
+
+      function renderNodes() {
+        const root = document.getElementById("nodes");
+        root.innerHTML = "";
+        if (lastNodesError) {
+          root.innerHTML = `<div class="empty">Node inventory unavailable: ${lastNodesError}</div>`;
+          knownNodeIds = [];
+          return;
+        }
+        const filter = nodeStateFilterEl.value;
+        const nodes = dataset.nodes.filter((node) => filter === "All" || node.state === filter);
+        knownNodeIds = dataset.nodes.map((node) => node.node_id);
+        if (!knownNodeIds.includes(focusNodeId) && knownNodeIds.length > 0) {
+          focusNodeId = knownNodeIds[0];
+          nodeFocusEl.textContent = focusNodeId;
+        }
+
+        for (const node of nodes) {
+          const badgeClass =
+            node.state === "Up" ? "good" : node.state === "Down" ? "bad" : "warn";
+          const card = document.createElement("article");
+          card.className = "card";
+          card.innerHTML = `
+            <header>
+              <strong>Node ${node.node_id}</strong>
+              <span class="badge ${badgeClass}">${node.state}</span>
+            </header>
+            <div class="statline">
+              <span><strong>Role</strong> ${node.role}</span>
+              <span><strong>Addr</strong> <span class="mono">${node.address}</span></span>
+              <span><strong>Heartbeat</strong> ${node.last_heartbeat_ts}</span>
+              <span><strong>CPU</strong> ${(node.cpu_usage * 100).toFixed(1)}%</span>
+              <span><strong>Memory</strong> ${(node.memory_usage * 100).toFixed(1)}%</span>
+              <span><strong>Free Disk</strong> ${node.disk_free_gb.toFixed(1)} GB</span>
+            </div>
+          `;
+          root.appendChild(card);
+        }
+
+        if (nodes.length === 0) {
+          root.innerHTML = `<div class="empty">No nodes match the current state filter.</div>`;
+        }
+      }
+
+      function renderMetaCluster() {
+        const root = document.getElementById("metaCluster");
+        root.innerHTML = "";
+        if (lastMetaClusterError) {
+          root.innerHTML = `<div class="empty">Meta cluster status unavailable: ${lastMetaClusterError}</div>`;
+          return;
+        }
+        if (dataset.metaCluster.length === 0) {
+          root.innerHTML = `<div class="empty">No meta nodes were returned by /api/meta/cluster.</div>`;
+          return;
+        }
+        for (const node of dataset.metaCluster) {
+          const badgeClass =
+            node.health === "Reachable" ? "good" : "bad";
+          const roleClass =
+            node.raft_role === "Leader" ? "warn" : node.raft_role === "Follower" ? "good" : "bad";
+          const card = document.createElement("article");
+          card.className = "card";
+          card.innerHTML = `
+            <header>
+              <strong>Meta Node ${node.node_id}${node.is_local ? " · local" : ""}</strong>
+              <span class="badge ${badgeClass}">${node.health}</span>
+            </header>
+            <div class="statline">
+              <span><strong>Role</strong> <span class="badge ${roleClass}">${node.raft_role}</span></span>
+              <span><strong>Addr</strong> <span class="mono">${node.address}</span></span>
+            </div>
+          `;
+          root.appendChild(card);
+        }
+      }
+
+      function renderRoutes() {
+        const root = document.getElementById("routes");
+        if (lastRoutesError) {
+          root.innerHTML = `<tr><td colspan="4">Tablet routes unavailable: ${lastRoutesError}</td></tr>`;
+          return;
+        }
+        const filter = routeStateFilterEl.value;
+        const routes = dataset.routes.filter((route) => {
+          if (!matchesTablet(route.tablet_id)) {
+            return false;
+          }
+          if (filter === "Assigned") {
+            return route.leader_cache_node_id !== 0;
+          }
+          if (filter === "Unassigned") {
+            return route.leader_cache_node_id === 0;
+          }
+          return true;
+        });
+
+        if (routes.length === 0) {
+          root.innerHTML = `<tr><td colspan="4">No tablet routes match the current filters.</td></tr>`;
+          return;
+        }
+
+        root.innerHTML = routes
+          .map(
+            (route) => `
+              <tr>
+                <td class="mono">${route.tablet_id}</td>
+                <td class="mono">${route.leader_cache_node_id}</td>
+                <td class="mono">${route.wal_replica_node_ids.join(", ")}</td>
+                <td class="mono">${route.epoch}</td>
+              </tr>
+            `,
+          )
+          .join("");
+      }
+
+      function renderNodeTablets() {
+        const root = document.getElementById("nodeTablets");
+        nodeFocusEl.textContent = focusNodeId;
+        if (lastNodeTabletsError) {
+          root.innerHTML = `<tr><td colspan="3">Node tablet view unavailable: ${lastNodeTabletsError}</td></tr>`;
+          return;
+        }
+        const tablets = dataset.nodeTablets.filter((tablet) => matchesTablet(tablet.tablet_id));
+        if (tablets.length === 0) {
+          root.innerHTML = `<tr><td colspan="3">No tablets associated with this node for the current search.</td></tr>`;
+          return;
+        }
+        root.innerHTML = tablets
+          .map(
+            (tablet) => `
+              <tr>
+                <td class="mono">${tablet.tablet_id}</td>
+                <td>${tablet.relation}</td>
+                <td class="mono">${tablet.epoch}</td>
+              </tr>
+            `,
+          )
+          .join("");
+      }
+
+      function renderCommands() {
+        const root = document.getElementById("commands");
+        if (lastCommandsError) {
+          root.innerHTML = `<tr><td colspan="7">Scheduler commands unavailable: ${lastCommandsError}</td></tr>`;
+          return;
+        }
+        const filter = commandStatusFilterEl.value;
+        const commands = dataset.commands.filter((command) => {
+          if (!matchesTablet(command.command.tablet_id)) {
+            return false;
+          }
+          return filter === "All" || command.status === filter;
+        });
+
+        if (commands.length === 0) {
+          root.innerHTML = `<tr><td colspan="7">No scheduler commands match the current filters.</td></tr>`;
+          return;
+        }
+
+        root.innerHTML = commands
+          .map((command) => {
+            const badgeClass =
+              command.status === "Completed"
+                ? "good"
+                : command.status === "Failed"
+                  ? "bad"
+                  : "warn";
+            const retryButton =
+              command.status === "Failed" && command.command.kind === "LoadTablet"
+                ? `<button class="mini success" data-retry="${command.command_id}">Retry</button>`
+                : "";
+            return `
+              <tr>
+                <td class="mono">${command.command_id}</td>
+                <td><span class="badge ${badgeClass}">${command.status}</span></td>
+                <td class="mono">${command.target_node_id}</td>
+                <td class="mono">${command.command.tablet_id}</td>
+                <td>${command.command.kind}</td>
+                <td>${command.failure_reason || command.command.detail}</td>
+                <td>${retryButton}</td>
+              </tr>
+            `;
+          })
+          .join("");
+
+        root.querySelectorAll("[data-retry]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const commandId = button.getAttribute("data-retry");
+            runAction("Retrying failed command", () =>
+              fetchJson(`/api/scheduler/commands/${commandId}/retry`, { method: "POST" }),
+            );
+          });
+        });
+      }
+
+      function renderAlerts() {
+        const root = document.getElementById("alerts");
+        const count = document.getElementById("alertCount");
+        if (lastAlertsError) {
+          count.textContent = "0 active operator alerts.";
+          root.innerHTML = `<div class="empty">Operator alerts unavailable: ${lastAlertsError}</div>`;
+          return;
+        }
+        const alerts = dataset.alerts.filter((alert) => matchesTablet(alert.tablet_id));
+        count.textContent = `${alerts.length} active operator alert${alerts.length === 1 ? "" : "s"}.`;
+
+        if (alerts.length === 0) {
+          root.innerHTML = `<div class="empty">No operator alerts for the current search. The control plane currently sees no manual intervention blockers.</div>`;
+          return;
+        }
+
+        root.innerHTML = alerts
+          .map(
+            (alert) => `
+              <article class="alert">
+                <strong>Tablet ${alert.tablet_id}</strong>
+                <div>${alert.reason}</div>
+                <div class="actions">
+                  <button class="mini danger" data-clear-alert="${alert.tablet_id}">Clear Alert</button>
+                </div>
+                <div class="footer-note mono">${alert.created_at_ts}</div>
+              </article>
+            `,
+          )
+          .join("");
+
+        root.querySelectorAll("[data-clear-alert]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const tabletId = button.getAttribute("data-clear-alert");
+            runAction("Clearing alert", () =>
+              fetchJson(`/api/tablets/${tabletId}/alerts/clear`, { method: "POST" }),
+            );
+          });
+        });
+      }
+
+      function renderAll() {
+        renderMetaCluster();
+        renderNodes();
+        renderRoutes();
+        renderNodeTablets();
+        renderCommands();
+        renderAlerts();
+      }
+
+      async function refreshNodeTablets() {
+        nodeFocusEl.textContent = focusNodeId;
+        if (!focusNodeId) {
+          dataset.nodeTablets = [];
+          lastNodeTabletsError = "no node selected";
+          renderNodeTablets();
+          return;
+        }
+        try {
+          const payload = await fetchJson(`/api/nodes/${focusNodeId}/tablets`);
+          dataset.nodeTablets = payload.data;
+          lastNodeTabletsError = "";
+        } catch (error) {
+          dataset.nodeTablets = [];
+          lastNodeTabletsError = error.message;
+        }
+        renderNodeTablets();
+      }
+
+      async function refreshAll() {
+        const [metaCluster, nodes, routes, commands, alerts] = await Promise.allSettled([
+          fetchJson("/api/meta/cluster"),
+          fetchJson("/api/nodes"),
+          fetchJson("/api/tablets/routes"),
+          fetchJson("/api/scheduler/commands"),
+          fetchJson("/api/tablets/alerts"),
+        ]);
+
+        lastRefreshEl.textContent = new Date().toLocaleTimeString();
+
+        if (metaCluster.status === "fulfilled") {
+          leaderHintEl.textContent = metaCluster.value.leader_hint || "unknown";
+          dataset.metaCluster = metaCluster.value.data;
+          lastMetaClusterError = "";
+        } else {
+          leaderHintEl.textContent = "error";
+          dataset.metaCluster = [];
+          lastMetaClusterError = metaCluster.reason.message;
+        }
+
+        if (nodes.status === "fulfilled") {
+          dataset.nodes = nodes.value.data;
+          knownNodeIds = dataset.nodes.map((node) => node.node_id);
+          lastNodesError = "";
+          if (!knownNodeIds.includes(focusNodeId) && knownNodeIds.length > 0) {
+            focusNodeId = knownNodeIds[0];
+          }
+        } else {
+          dataset.nodes = [];
+          knownNodeIds = [];
+          lastNodesError = nodes.reason.message;
+        }
+
+        if (routes.status === "fulfilled") {
+          dataset.routes = routes.value.data;
+          lastRoutesError = "";
+        } else {
+          dataset.routes = [];
+          lastRoutesError = routes.reason.message;
+        }
+
+        if (commands.status === "fulfilled") {
+          dataset.commands = commands.value.data;
+          lastCommandsError = "";
+        } else {
+          dataset.commands = [];
+          lastCommandsError = commands.reason.message;
+        }
+
+        if (alerts.status === "fulfilled") {
+          dataset.alerts = alerts.value.data;
+          lastAlertsError = "";
+        } else {
+          dataset.alerts = [];
+          lastAlertsError = alerts.reason.message;
+        }
+
+        await refreshNodeTablets();
+        renderAll();
+
+        const errors = [
+          lastMetaClusterError,
+          lastNodesError,
+          lastRoutesError,
+          lastCommandsError,
+          lastAlertsError,
+          lastNodeTabletsError,
+        ].filter(Boolean);
+        actionStatusEl.textContent = errors.length === 0
+          ? "No pending manual action."
+          : `Partial data available. ${errors[0]}`;
+      }
+
+      scheduleRefresh();
+      refreshAll();
+    </script>
+  </body>
+</html>

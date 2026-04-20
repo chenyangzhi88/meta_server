@@ -14,15 +14,24 @@ message NodeInfo {
 }
 
 message SchedulerCommand {
-  string kind = 1;
-  uint64 tablet_id = 2;
-  uint64 epoch = 3;
-  repeated uint64 wal_replica_node_ids = 4;
-  string detail = 5;
+  uint64 command_id = 1;
+  string kind = 2;
+  uint64 tablet_id = 3;
+  uint64 epoch = 4;
+  repeated uint64 wal_replica_node_ids = 5;
+  string detail = 6;
 }
 
 message HeartbeatRequest {
   NodeInfo node = 1;
+  repeated uint64 acked_command_ids = 2;
+  repeated uint64 completed_command_ids = 3;
+  repeated FailedCommand failed_commands = 4;
+}
+
+message FailedCommand {
+  uint64 command_id = 1;
+  string reason = 2;
 }
 
 message HeartbeatResponse {
@@ -48,6 +57,101 @@ message GetTabletRouteResponse {
   string leader_hint = 3;
 }
 
+message ListNodesRequest {}
+
+message ListNodesResponse {
+  repeated NodeInfo nodes = 1;
+  string leader_hint = 2;
+}
+
+message ListTabletRoutesRequest {}
+
+message ListTabletRoutesResponse {
+  repeated TabletRoute routes = 1;
+  string leader_hint = 2;
+}
+
+message GetNodeTabletsRequest {
+  uint64 node_id = 1;
+}
+
+message NodeTabletInfo {
+  uint64 tablet_id = 1;
+  string relation = 2;
+  uint64 epoch = 3;
+}
+
+message GetNodeTabletsResponse {
+  uint64 node_id = 1;
+  repeated NodeTabletInfo tablets = 2;
+  string leader_hint = 3;
+}
+
+message ListSchedulerCommandsRequest {}
+
+message SchedulerCommandRecord {
+  uint64 command_id = 1;
+  uint64 target_node_id = 2;
+  string status = 3;
+  uint64 created_at_ts = 4;
+  uint64 acked_at_ts = 5;
+  uint64 completed_at_ts = 6;
+  uint64 failed_at_ts = 7;
+  string failure_reason = 8;
+  SchedulerCommand command = 9;
+}
+
+message ListSchedulerCommandsResponse {
+  repeated SchedulerCommandRecord commands = 1;
+  string leader_hint = 2;
+}
+
+message TabletAlert {
+  uint64 tablet_id = 1;
+  string reason = 2;
+  uint64 created_at_ts = 3;
+}
+
+message ListTabletAlertsRequest {}
+
+message ListTabletAlertsResponse {
+  repeated TabletAlert alerts = 1;
+  string leader_hint = 2;
+}
+
+message GetMetaClusterStatusRequest {}
+
+message MetaNodeStatus {
+  uint64 node_id = 1;
+  string address = 2;
+  string raft_role = 3;
+  uint64 leader_id = 4;
+  uint64 observed_at_ts = 5;
+  bool is_voter = 6;
+}
+
+message GetMetaClusterStatusResponse {
+  MetaNodeStatus local_node = 1;
+  repeated uint64 voters = 2;
+  string leader_hint = 3;
+}
+
+message BeginTabletMigrationRequest {
+  uint64 tablet_id = 1;
+  uint64 source_node_id = 2;
+  uint64 target_node_id = 3;
+}
+
+message CompleteTabletMigrationRequest {
+  uint64 tablet_id = 1;
+  uint64 target_node_id = 2;
+}
+
+message MutationResponse {
+  bool accepted = 1;
+  string leader_hint = 2;
+}
+
 message RaftMessage {
   bytes data = 1;
 }
@@ -59,6 +163,14 @@ message RaftMessageAck {
 service MetaService {
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
   rpc GetTabletRoute(GetTabletRouteRequest) returns (GetTabletRouteResponse);
+  rpc ListNodes(ListNodesRequest) returns (ListNodesResponse);
+  rpc ListTabletRoutes(ListTabletRoutesRequest) returns (ListTabletRoutesResponse);
+  rpc GetNodeTablets(GetNodeTabletsRequest) returns (GetNodeTabletsResponse);
+  rpc ListSchedulerCommands(ListSchedulerCommandsRequest) returns (ListSchedulerCommandsResponse);
+  rpc ListTabletAlerts(ListTabletAlertsRequest) returns (ListTabletAlertsResponse);
+  rpc GetMetaClusterStatus(GetMetaClusterStatusRequest) returns (GetMetaClusterStatusResponse);
+  rpc BeginTabletMigration(BeginTabletMigrationRequest) returns (MutationResponse);
+  rpc CompleteTabletMigration(CompleteTabletMigrationRequest) returns (MutationResponse);
 }
 
 service RaftTransport {

@@ -9,7 +9,7 @@ use anyhow::{Context, Result, anyhow};
 use protobuf::Message as ProtobufMessage;
 use raft::eraftpb::{Entry, EntryType, Message as RaftMessageProto};
 use raft::raw_node::RawNode;
-use raft::{Config, StateRole};
+use raft::{Config, StateRole, Storage};
 use tokio::sync::Mutex;
 
 use crate::command::MetaCommand;
@@ -55,6 +55,7 @@ impl RaftNodeFacade {
         storage.set_conf_state(conf_state);
         let raw_node =
             RawNode::with_default_logger(&config, storage.clone()).context("create raw node")?;
+        let (applied_index, applied_term) = Self::restore_state_machine(&storage, &state_machine)?;
 
         Ok(Self {
             inner: Arc::new(Mutex::new(RaftNodeCore {
@@ -63,12 +64,44 @@ impl RaftNodeFacade {
                 storage,
                 state_machine,
                 network,
-                applied_index: 0,
-                applied_term: 0,
+                applied_index,
+                applied_term,
                 completed_reads: HashMap::new(),
             })),
             next_read_ctx: Arc::new(AtomicU64::new(1)),
         })
+    }
+
+    fn restore_state_machine(
+        storage: &MetaStorage,
+        state_machine: &MetaStateMachine,
+    ) -> Result<(u64, u64)> {
+        let snapshot = storage.snapshot(0, 0).unwrap_or_default();
+        if !snapshot.is_empty() && !snapshot.data.is_empty() {
+            state_machine.restore_from_snapshot_bytes(&snapshot.data)?;
+            let metadata = snapshot.get_metadata();
+            return Ok((metadata.index, metadata.term));
+        }
+
+        let entries = storage.all_entries();
+        let mut applied_index = 0;
+        let mut applied_term = 0;
+        for entry in entries.into_iter().skip(1) {
+            applied_index = applied_index.max(entry.index);
+            applied_term = entry.term;
+            if entry.data.is_empty() {
+                continue;
+            }
+            if entry.get_entry_type() != EntryType::EntryNormal {
+                continue;
+            }
+            let command: MetaCommand =
+                serde_json::from_slice(&entry.data).context("decode restored meta command")?;
+            state_machine
+                .apply(command)
+                .context("apply restored meta command")?;
+        }
+        Ok((applied_index, applied_term))
     }
 
     pub async fn bootstrap_single_node(

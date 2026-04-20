@@ -1,8 +1,11 @@
 pub mod command;
+pub mod config;
+pub mod http_gateway;
 pub mod meta_service;
 pub mod model;
 pub mod network;
 pub mod raft_node;
+pub mod reconciler;
 pub mod scheduler;
 pub mod state_machine;
 pub mod storage;

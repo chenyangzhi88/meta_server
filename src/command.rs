@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{ServerNode, TabletRoute};
+use crate::model::{SchedulerCommandSpec, ServerNode, TabletRoute};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MetaCommand {
@@ -18,5 +18,31 @@ pub enum MetaCommand {
         tablet_id: u64,
         next_epoch: u64,
         next_leader_cache_node_id: Option<u64>,
+    },
+    CreateSchedulerCommand {
+        target_node_id: u64,
+        spec: SchedulerCommandSpec,
+        created_at_ts: u64,
+    },
+    AckSchedulerCommand {
+        command_id: u64,
+        acked_at_ts: u64,
+    },
+    CompleteSchedulerCommand {
+        command_id: u64,
+        completed_at_ts: u64,
+    },
+    FailSchedulerCommand {
+        command_id: u64,
+        failed_at_ts: u64,
+        reason: String,
+    },
+    UpsertTabletOperatorAlert {
+        tablet_id: u64,
+        reason: String,
+        created_at_ts: u64,
+    },
+    ClearTabletOperatorAlert {
+        tablet_id: u64,
     },
 }

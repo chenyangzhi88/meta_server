@@ -1,5 +1,5 @@
 use std::fs::{File, OpenOptions, create_dir_all};
-use std::io::Write;
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -28,9 +28,7 @@ struct StorageCore {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct WalRecord {
-    index: u64,
-    term: u64,
-    data: Vec<u8>,
+    entry_bytes: Vec<u8>,
 }
 
 impl MetaStorage {
@@ -44,11 +42,13 @@ impl MetaStorage {
             .open(&wal_path)
             .with_context(|| format!("open raft wal at {}", wal_path.display()))?;
 
+        let (entries, hard_state) = Self::load_wal(&wal_path)?;
+
         Ok(Self {
             inner: Arc::new(RwLock::new(StorageCore {
-                hard_state: HardState::default(),
+                hard_state,
                 conf_state: ConfState::default(),
-                entries: vec![Entry::default()],
+                entries,
                 snapshot: Snapshot::default(),
                 wal,
             })),
@@ -64,9 +64,7 @@ impl MetaStorage {
         }
         for entry in new_entries {
             let record = WalRecord {
-                index: entry.index,
-                term: entry.term,
-                data: entry.data.to_vec(),
+                entry_bytes: entry.write_to_bytes().context("encode wal entry")?,
             };
             let encoded = serde_json::to_vec(&record).context("encode wal record")?;
             inner.wal.write_all(&encoded).context("append wal record")?;
@@ -114,6 +112,44 @@ impl MetaStorage {
         snapshot.metadata = protobuf::SingularPtrField::some(metadata);
         snapshot.data = data.into();
         self.install_snapshot(snapshot);
+    }
+
+    pub fn all_entries(&self) -> Vec<Entry> {
+        self.inner.read().entries.clone()
+    }
+
+    fn load_wal(path: &Path) -> Result<(Vec<Entry>, HardState)> {
+        if !path.exists() {
+            return Ok((vec![Entry::default()], HardState::default()));
+        }
+
+        let file =
+            File::open(path).with_context(|| format!("open wal for replay {}", path.display()))?;
+        let reader = BufReader::new(file);
+        let mut entries = vec![Entry::default()];
+        for line in reader.lines() {
+            let line = line.context("read wal line")?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            let record: WalRecord =
+                serde_json::from_str(&line).context("decode wal record during replay")?;
+            let entry = Entry::parse_from_bytes(&record.entry_bytes)
+                .context("decode wal entry during replay")?;
+            if entry.index < entries.len() as u64 {
+                entries.truncate(entry.index as usize);
+            }
+            entries.push(entry);
+        }
+
+        let mut hard_state = HardState::default();
+        if let Some(last) = entries.last()
+            && last.index > 0
+        {
+            hard_state.term = last.term;
+            hard_state.commit = last.index;
+        }
+        Ok((entries, hard_state))
     }
 }
 
