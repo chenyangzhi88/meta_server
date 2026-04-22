@@ -131,6 +131,7 @@ impl RaftNodeFacade {
     }
 
     pub async fn propose(&self, payload: Vec<u8>) -> Result<()> {
+        self.ensure_single_node_leader().await?;
         {
             let mut inner = self.inner.lock().await;
             inner
@@ -150,6 +151,7 @@ impl RaftNodeFacade {
     }
 
     pub async fn read_index(&self) -> Result<()> {
+        self.ensure_single_node_leader().await?;
         let request_ctx = self
             .next_read_ctx
             .fetch_add(1, Ordering::Relaxed)
@@ -212,6 +214,23 @@ impl RaftNodeFacade {
     pub async fn leader_id(&self) -> u64 {
         let inner = self.inner.lock().await;
         inner.raw_node.raft.leader_id
+    }
+
+    pub async fn voter_count(&self) -> usize {
+        let inner = self.inner.lock().await;
+        inner.storage.conf_state().voters.len()
+    }
+
+    async fn ensure_single_node_leader(&self) -> Result<()> {
+        let should_campaign = {
+            let inner = self.inner.lock().await;
+            inner.storage.conf_state().voters.len() == 1
+                && inner.raw_node.raft.state != StateRole::Leader
+        };
+        if should_campaign {
+            self.campaign().await?;
+        }
+        Ok(())
     }
 
     async fn process_ready(&self) -> Result<()> {

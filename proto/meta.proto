@@ -11,6 +11,13 @@ message NodeInfo {
   double cpu_usage = 6;
   double memory_usage = 7;
   double disk_free_gb = 8;
+  WalServerInfo wal_server_info = 9;
+}
+
+message WalServerInfo {
+  uint64 raft_group_count = 1;
+  uint64 max_raft_group_count = 2;
+  repeated uint64 raft_group_ids = 3;
 }
 
 message SchedulerCommand {

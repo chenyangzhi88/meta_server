@@ -2,6 +2,27 @@
 
 `meta_server` is a Raft-backed metadata service for node registration and tablet routing.
 
+Persistence layout under `storage_dir`:
+
+- `meta-raft.wal`: append-only Raft log
+- `snapshot_db/`: standalone embedded LSM store used for persisted Raft snapshots and `HardState`
+
+Current scope in the codebase:
+
+- tracks `ServerNode`
+- tracks `TabletRoute`
+- tracks scheduler commands for cache tablet migration / failover
+- does not yet persist WAL raft-group metadata such as `raft_group_id -> replicas`
+- does not yet persist `stream_id -> raft_group_id` assignments
+
+To prepare integration with an external WAL service, the repository now includes
+`proto/wal_meta.proto`. That file defines the intended cross-service contract for:
+
+- creating and deleting WAL raft groups
+- assigning a stream to a WAL raft group
+- reassigning or unassigning a stream
+- querying raft-group metadata and stream assignments
+
 ## Configuration
 
 The server now loads startup topology from `meta.toml` in the current directory by default.

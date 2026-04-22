@@ -13,6 +13,8 @@ use raft::eraftpb::{ConfState, Entry, HardState, Snapshot, SnapshotMetadata};
 use raft::{Error as RaftError, RaftState};
 use serde::{Deserialize, Serialize};
 
+use crate::snapshot_store::SnapshotStore;
+
 #[derive(Clone)]
 pub struct MetaStorage {
     inner: Arc<RwLock<StorageCore>>,
@@ -24,6 +26,7 @@ struct StorageCore {
     entries: Vec<Entry>,
     snapshot: Snapshot,
     wal: File,
+    snapshot_store: SnapshotStore,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -41,16 +44,34 @@ impl MetaStorage {
             .read(true)
             .open(&wal_path)
             .with_context(|| format!("open raft wal at {}", wal_path.display()))?;
+        let snapshot_store = SnapshotStore::open(PathBuf::from(dir.as_ref()).join("snapshot_db"))?;
 
-        let (entries, hard_state) = Self::load_wal(&wal_path)?;
+        let (entries, wal_hard_state) = Self::load_wal(&wal_path)?;
+        let snapshot = snapshot_store.load().unwrap_or_default();
+        let mut hard_state = snapshot_store.load_hard_state().unwrap_or(wal_hard_state);
+        let mut conf_state = ConfState::default();
+        let entries = if !snapshot.is_empty() {
+            let index = snapshot.get_metadata().index;
+            let term = snapshot.get_metadata().term;
+            conf_state = snapshot.get_metadata().get_conf_state().clone();
+            hard_state.commit = hard_state.commit.max(index);
+            hard_state.term = hard_state.term.max(term);
+            let mut marker = Entry::default();
+            marker.index = index;
+            marker.term = term;
+            vec![marker]
+        } else {
+            entries
+        };
 
         Ok(Self {
             inner: Arc::new(RwLock::new(StorageCore {
                 hard_state,
-                conf_state: ConfState::default(),
+                conf_state,
                 entries,
-                snapshot: Snapshot::default(),
+                snapshot,
                 wal,
+                snapshot_store,
             })),
         })
     }
@@ -76,7 +97,12 @@ impl MetaStorage {
     }
 
     pub fn set_hard_state(&self, hard_state: HardState) {
-        self.inner.write().hard_state = hard_state;
+        let mut inner = self.inner.write();
+        inner
+            .snapshot_store
+            .persist_hard_state(&hard_state)
+            .expect("persist raft hard state");
+        inner.hard_state = hard_state;
     }
 
     pub fn hard_state(&self) -> HardState {
@@ -100,6 +126,10 @@ impl MetaStorage {
         marker.term = term;
         inner.entries.clear();
         inner.entries.push(marker);
+        inner
+            .snapshot_store
+            .persist(&snapshot)
+            .expect("persist raft snapshot");
         inner.snapshot = snapshot;
     }
 
@@ -219,5 +249,60 @@ impl Storage for MetaStorage {
 
     fn snapshot(&self, _request_index: u64, _to: u64) -> RaftResult<Snapshot> {
         Ok(self.inner.read().snapshot.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use protobuf::SingularPtrField;
+    use raft::Storage;
+    use raft::eraftpb::{ConfState, HardState, Snapshot, SnapshotMetadata};
+
+    use super::MetaStorage;
+
+    #[test]
+    fn restores_snapshot_from_standalone_snapshot_store() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        {
+            let storage = MetaStorage::open(temp.path())?;
+            let mut snapshot = Snapshot::default();
+            let mut metadata = SnapshotMetadata::default();
+            metadata.index = 9;
+            metadata.term = 4;
+            metadata.conf_state = SingularPtrField::some(ConfState::default());
+            snapshot.metadata = SingularPtrField::some(metadata);
+            snapshot.data = b"snapshot-payload".to_vec().into();
+            storage.install_snapshot(snapshot.clone());
+        }
+
+        let reopened = MetaStorage::open(temp.path())?;
+        let restored = reopened.snapshot(0, 0).unwrap();
+        assert_eq!(restored.get_metadata().index, 9);
+        assert_eq!(restored.get_metadata().term, 4);
+        assert_eq!(restored.data.as_ref(), b"snapshot-payload");
+        assert_eq!(reopened.first_index().unwrap(), 9);
+        assert_eq!(reopened.last_index().unwrap(), 9);
+        Ok(())
+    }
+
+    #[test]
+    fn restores_hard_state_from_standalone_snapshot_store() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        {
+            let storage = MetaStorage::open(temp.path())?;
+            let mut hard_state = HardState::default();
+            hard_state.term = 8;
+            hard_state.vote = 3;
+            hard_state.commit = 15;
+            storage.set_hard_state(hard_state);
+        }
+
+        let reopened = MetaStorage::open(temp.path())?;
+        let restored = reopened.hard_state();
+        assert_eq!(restored.term, 8);
+        assert_eq!(restored.vote, 3);
+        assert_eq!(restored.commit, 15);
+        Ok(())
     }
 }

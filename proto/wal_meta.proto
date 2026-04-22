@@ -1,0 +1,155 @@
+syntax = "proto3";
+
+package walmeta;
+
+enum RaftGroupState {
+  RAFT_GROUP_STATE_UNSPECIFIED = 0;
+  RAFT_GROUP_STATE_CREATING = 1;
+  RAFT_GROUP_STATE_ACTIVE = 2;
+  RAFT_GROUP_STATE_RECONFIGURING = 3;
+  RAFT_GROUP_STATE_DELETING = 4;
+  RAFT_GROUP_STATE_ERROR = 5;
+}
+
+enum StreamAssignmentState {
+  STREAM_ASSIGNMENT_STATE_UNSPECIFIED = 0;
+  STREAM_ASSIGNMENT_STATE_ASSIGNING = 1;
+  STREAM_ASSIGNMENT_STATE_ASSIGNED = 2;
+  STREAM_ASSIGNMENT_STATE_MOVING = 3;
+  STREAM_ASSIGNMENT_STATE_UNASSIGNED = 4;
+  STREAM_ASSIGNMENT_STATE_ERROR = 5;
+}
+
+message WalRaftReplica {
+  uint64 node_id = 1;
+  string address = 2;
+}
+
+message WalRaftGroupDescriptor {
+  string cluster_name = 1;
+  uint64 raft_group_id = 2;
+  uint64 epoch = 3;
+  repeated WalRaftReplica replicas = 4;
+  uint64 leader_node_id = 5;
+  RaftGroupState state = 6;
+}
+
+message StreamAssignment {
+  uint64 stream_id = 1;
+  uint64 raft_group_id = 2;
+  uint64 epoch = 3;
+  StreamAssignmentState state = 4;
+}
+
+message MutationResult {
+  bool accepted = 1;
+  string message = 2;
+}
+
+message CreateRaftGroupRequest {
+  string cluster_name = 1;
+  uint64 raft_group_id = 2;
+  uint64 epoch = 3;
+  repeated WalRaftReplica replicas = 4;
+}
+
+message CreateRaftGroupResponse {
+  MutationResult result = 1;
+  WalRaftGroupDescriptor group = 2;
+}
+
+message DeleteRaftGroupRequest {
+  string cluster_name = 1;
+  uint64 raft_group_id = 2;
+  uint64 epoch = 3;
+}
+
+message DeleteRaftGroupResponse {
+  MutationResult result = 1;
+}
+
+message AssignStreamRequest {
+  string cluster_name = 1;
+  uint64 stream_id = 2;
+  uint64 raft_group_id = 3;
+  uint64 assignment_epoch = 4;
+}
+
+message AssignStreamResponse {
+  MutationResult result = 1;
+  StreamAssignment assignment = 2;
+}
+
+message ReassignStreamRequest {
+  string cluster_name = 1;
+  uint64 stream_id = 2;
+  uint64 source_raft_group_id = 3;
+  uint64 target_raft_group_id = 4;
+  uint64 assignment_epoch = 5;
+  string reason = 6;
+}
+
+message ReassignStreamResponse {
+  MutationResult result = 1;
+  StreamAssignment assignment = 2;
+}
+
+message UnassignStreamRequest {
+  string cluster_name = 1;
+  uint64 stream_id = 2;
+  uint64 raft_group_id = 3;
+  uint64 assignment_epoch = 4;
+}
+
+message UnassignStreamResponse {
+  MutationResult result = 1;
+}
+
+message GetRaftGroupRequest {
+  string cluster_name = 1;
+  uint64 raft_group_id = 2;
+}
+
+message GetRaftGroupResponse {
+  bool found = 1;
+  WalRaftGroupDescriptor group = 2;
+}
+
+message ListRaftGroupsRequest {
+  string cluster_name = 1;
+}
+
+message ListRaftGroupsResponse {
+  repeated WalRaftGroupDescriptor groups = 1;
+}
+
+message GetStreamAssignmentRequest {
+  string cluster_name = 1;
+  uint64 stream_id = 2;
+}
+
+message GetStreamAssignmentResponse {
+  bool found = 1;
+  StreamAssignment assignment = 2;
+}
+
+message ListStreamAssignmentsRequest {
+  string cluster_name = 1;
+  uint64 raft_group_id = 2;
+}
+
+message ListStreamAssignmentsResponse {
+  repeated StreamAssignment assignments = 1;
+}
+
+service WalManagerService {
+  rpc CreateRaftGroup(CreateRaftGroupRequest) returns (CreateRaftGroupResponse);
+  rpc DeleteRaftGroup(DeleteRaftGroupRequest) returns (DeleteRaftGroupResponse);
+  rpc AssignStream(AssignStreamRequest) returns (AssignStreamResponse);
+  rpc ReassignStream(ReassignStreamRequest) returns (ReassignStreamResponse);
+  rpc UnassignStream(UnassignStreamRequest) returns (UnassignStreamResponse);
+  rpc GetRaftGroup(GetRaftGroupRequest) returns (GetRaftGroupResponse);
+  rpc ListRaftGroups(ListRaftGroupsRequest) returns (ListRaftGroupsResponse);
+  rpc GetStreamAssignment(GetStreamAssignmentRequest) returns (GetStreamAssignmentResponse);
+  rpc ListStreamAssignments(ListStreamAssignmentsRequest) returns (ListStreamAssignmentsResponse);
+}

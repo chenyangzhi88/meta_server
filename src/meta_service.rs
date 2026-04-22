@@ -4,12 +4,15 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use raft::StateRole;
+use tokio::sync::Mutex;
 use tonic::{Request, Response, Status};
 
 use crate::command::MetaCommand;
 use crate::model::{
     NodeState, SchedulerCommand as DomainSchedulerCommand, SchedulerCommandKind, ServerNode,
-    ServerRole,
+    ServerRole, StreamAssignment as DomainStreamAssignment, StreamAssignmentState,
+    WalRaftGroup as DomainWalRaftGroup, WalRaftGroupState, WalRaftReplica,
+    WalServerInfo as DomainWalServerInfo,
 };
 use crate::pb::meta_service_server::MetaService;
 use crate::pb::raft_transport_server::RaftTransport;
@@ -22,10 +25,21 @@ use crate::pb::{
     ListTabletRoutesRequest, ListTabletRoutesResponse, MetaNodeStatus, MutationResponse, NodeInfo,
     NodeTabletInfo, RaftMessage, RaftMessageAck, SchedulerCommand,
     SchedulerCommandRecord as PbSchedulerCommandRecord, TabletAlert, TabletRoute as PbTabletRoute,
+    WalServerInfo,
 };
 use crate::raft_node::RaftNodeFacade;
-use crate::scheduler::TabletScheduler;
+use crate::scheduler::{TabletScheduler, WalGroupScheduler};
 use crate::state_machine::MetaStateMachine;
+use crate::wal_pb::wal_manager_service_server::WalManagerService;
+use crate::wal_pb::{
+    AssignStreamRequest, AssignStreamResponse, CreateRaftGroupRequest, CreateRaftGroupResponse,
+    DeleteRaftGroupRequest, DeleteRaftGroupResponse, GetRaftGroupRequest, GetRaftGroupResponse,
+    GetStreamAssignmentRequest, GetStreamAssignmentResponse, ListRaftGroupsRequest,
+    ListRaftGroupsResponse, ListStreamAssignmentsRequest, ListStreamAssignmentsResponse,
+    MutationResult, RaftGroupState, ReassignStreamRequest, ReassignStreamResponse,
+    StreamAssignment, StreamAssignmentState as PbStreamAssignmentState, UnassignStreamRequest,
+    UnassignStreamResponse, WalRaftGroupDescriptor, WalRaftReplica as PbWalRaftReplica,
+};
 
 #[derive(Clone)]
 pub struct MetaServiceState {
@@ -35,6 +49,7 @@ pub struct MetaServiceState {
     pub meta_node_id: u64,
     pub meta_voters: Vec<u64>,
     pub meta_peers: HashMap<u64, String>,
+    pub wal_mutation_lock: Arc<Mutex<()>>,
 }
 
 #[derive(Clone)]
@@ -52,6 +67,9 @@ impl MetaGrpcService {
     }
 
     async fn propose_command(&self, command: MetaCommand) -> Result<()> {
+        if self.state.raft.voter_count().await == 1 {
+            return self.state.state_machine.apply(command);
+        }
         let bytes = serde_json::to_vec(&command).context("encode meta command")?;
         self.state.raft.propose(bytes).await
     }
@@ -62,6 +80,10 @@ impl MetaGrpcService {
 
     fn scheduler(&self) -> TabletScheduler {
         TabletScheduler::new(self.state.state_machine.clone())
+    }
+
+    fn wal_scheduler(&self) -> WalGroupScheduler {
+        WalGroupScheduler::new(self.state.state_machine.clone())
     }
 
     async fn ensure_leader(&self) -> Result<(), Status> {
@@ -104,6 +126,11 @@ impl MetaGrpcService {
             cpu_usage: node.cpu_usage,
             memory_usage: node.memory_usage,
             disk_free_gb: node.disk_free_gb,
+            wal_server_info: node.wal_server_info.map(|info| DomainWalServerInfo {
+                raft_group_count: info.raft_group_count,
+                max_raft_group_count: info.max_raft_group_count,
+                raft_group_ids: info.raft_group_ids,
+            }),
         })
     }
 
@@ -142,6 +169,45 @@ impl MetaGrpcService {
         }
     }
 
+    fn map_wal_group(group: DomainWalRaftGroup) -> WalRaftGroupDescriptor {
+        WalRaftGroupDescriptor {
+            cluster_name: group.cluster_name,
+            raft_group_id: group.raft_group_id,
+            epoch: group.epoch,
+            replicas: group
+                .replicas
+                .into_iter()
+                .map(|replica| PbWalRaftReplica {
+                    node_id: replica.node_id,
+                    address: replica.address,
+                })
+                .collect(),
+            leader_node_id: group.leader_node_id,
+            state: match group.state {
+                WalRaftGroupState::Creating => RaftGroupState::Creating as i32,
+                WalRaftGroupState::Active => RaftGroupState::Active as i32,
+                WalRaftGroupState::Reconfiguring => RaftGroupState::Reconfiguring as i32,
+                WalRaftGroupState::Deleting => RaftGroupState::Deleting as i32,
+                WalRaftGroupState::Error => RaftGroupState::Error as i32,
+            },
+        }
+    }
+
+    fn map_stream_assignment(assignment: DomainStreamAssignment) -> StreamAssignment {
+        StreamAssignment {
+            stream_id: assignment.stream_id,
+            raft_group_id: assignment.raft_group_id,
+            epoch: assignment.epoch,
+            state: match assignment.state {
+                StreamAssignmentState::Assigning => PbStreamAssignmentState::Assigning as i32,
+                StreamAssignmentState::Assigned => PbStreamAssignmentState::Assigned as i32,
+                StreamAssignmentState::Moving => PbStreamAssignmentState::Moving as i32,
+                StreamAssignmentState::Unassigned => PbStreamAssignmentState::Unassigned as i32,
+                StreamAssignmentState::Error => PbStreamAssignmentState::Error as i32,
+            },
+        }
+    }
+
     fn leader_hint(&self) -> String {
         self.state.advertised_leader.clone().unwrap_or_default()
     }
@@ -172,6 +238,138 @@ impl MetaGrpcService {
             observed_at_ts: now_ts(),
             is_voter: self.state.meta_voters.contains(&node_id),
         }
+    }
+
+    async fn propose_and_get_group(
+        &self,
+        command: MetaCommand,
+        cluster_name: &str,
+        raft_group_id: u64,
+    ) -> Result<DomainWalRaftGroup> {
+        self.propose_command(command).await?;
+        self.state_machine()
+            .wal_raft_group(cluster_name, raft_group_id)
+            .with_context(|| format!("wal raft group {} not found after proposal", raft_group_id))
+    }
+
+    async fn propose_and_get_assignment(
+        &self,
+        command: MetaCommand,
+        cluster_name: &str,
+        stream_id: u64,
+    ) -> Result<DomainStreamAssignment> {
+        self.propose_command(command).await?;
+        self.state_machine()
+            .stream_assignment(cluster_name, stream_id)
+            .with_context(|| format!("stream {} not found after proposal", stream_id))
+    }
+
+    async fn apply_scheduler_ack(&self, reporter_node_id: u64, command_id: u64) -> Result<()> {
+        let Some(record) = self.state_machine().scheduler_command(command_id) else {
+            return Ok(());
+        };
+        if record.target_node_id != reporter_node_id {
+            anyhow::bail!(
+                "scheduler command {} belongs to node {}, not reporter {}",
+                command_id,
+                record.target_node_id,
+                reporter_node_id
+            );
+        }
+        self.propose_command(MetaCommand::AckSchedulerCommand {
+            command_id,
+            acked_at_ts: now_ts(),
+        })
+        .await
+    }
+
+    async fn apply_scheduler_completion(
+        &self,
+        reporter_node_id: u64,
+        command_id: u64,
+    ) -> Result<()> {
+        let Some(record) = self.state_machine().scheduler_command(command_id) else {
+            return Ok(());
+        };
+        if record.target_node_id != reporter_node_id {
+            anyhow::bail!(
+                "scheduler command {} belongs to node {}, not reporter {}",
+                command_id,
+                record.target_node_id,
+                reporter_node_id
+            );
+        }
+
+        match record.command.kind {
+            SchedulerCommandKind::DropTablet => {}
+            SchedulerCommandKind::LoadTablet => {
+                let route = self
+                    .state_machine()
+                    .route(record.command.tablet_id)
+                    .with_context(|| {
+                        format!(
+                            "tablet route {} not found for completion",
+                            record.command.tablet_id
+                        )
+                    })?;
+                if route.epoch < record.command.epoch {
+                    anyhow::bail!(
+                        "tablet {} route epoch {} is behind completed command epoch {}",
+                        record.command.tablet_id,
+                        route.epoch,
+                        record.command.epoch
+                    );
+                }
+
+                if route.leader_cache_node_id == 0 && route.epoch == record.command.epoch {
+                    let command = self
+                        .scheduler()
+                        .complete_migration(record.command.tablet_id, reporter_node_id)?;
+                    self.propose_command(command).await?;
+                } else if route.leader_cache_node_id != reporter_node_id {
+                    anyhow::bail!(
+                        "tablet {} route leader {} does not match completed load target {}",
+                        record.command.tablet_id,
+                        route.leader_cache_node_id,
+                        reporter_node_id
+                    );
+                }
+            }
+        }
+
+        self.propose_command(MetaCommand::CompleteSchedulerCommand {
+            command_id,
+            completed_at_ts: now_ts(),
+        })
+        .await
+    }
+
+    async fn apply_scheduler_failure(
+        &self,
+        reporter_node_id: u64,
+        command_id: u64,
+        reason: String,
+    ) -> Result<()> {
+        let Some(record) = self.state_machine().scheduler_command(command_id) else {
+            return Ok(());
+        };
+        if record.target_node_id != reporter_node_id {
+            anyhow::bail!(
+                "scheduler command {} belongs to node {}, not reporter {}",
+                command_id,
+                record.target_node_id,
+                reporter_node_id
+            );
+        }
+        if reason.trim().is_empty() {
+            anyhow::bail!("scheduler command {} failure reason is empty", command_id);
+        }
+        self.propose_command(MetaCommand::FailSchedulerCommand {
+            command_id,
+            failed_at_ts: now_ts(),
+            reason,
+        })
+        .await
     }
 }
 
@@ -204,17 +402,10 @@ impl MetaService for MetaGrpcService {
                 .map_err(internal_status)?;
         }
 
-        let command = if self.state_machine().node(node_id).is_some() {
-            MetaCommand::UpdateNodeHeartbeat {
-                node_id,
-                last_heartbeat_ts: now_ts(),
-            }
-        } else {
-            MetaCommand::UpsertNode(ServerNode {
-                last_heartbeat_ts: now_ts(),
-                ..server_node.clone()
-            })
-        };
+        let command = MetaCommand::UpsertNode(ServerNode {
+            last_heartbeat_ts: now_ts(),
+            ..server_node.clone()
+        });
         self.propose_command(command)
             .await
             .map_err(internal_status)?;
@@ -292,6 +483,11 @@ impl MetaService for MetaGrpcService {
                 cpu_usage: node.cpu_usage,
                 memory_usage: node.memory_usage,
                 disk_free_gb: node.disk_free_gb,
+                wal_server_info: node.wal_server_info.map(|info| WalServerInfo {
+                    raft_group_count: info.raft_group_count,
+                    max_raft_group_count: info.max_raft_group_count,
+                    raft_group_ids: info.raft_group_ids,
+                }),
             })
             .collect::<Vec<_>>();
         nodes.sort_by_key(|node| node.node_id);
@@ -479,113 +675,321 @@ impl MetaService for MetaGrpcService {
     }
 }
 
-impl MetaGrpcService {
-    async fn apply_scheduler_ack(&self, reporter_node_id: u64, command_id: u64) -> Result<()> {
-        let Some(record) = self.state_machine().scheduler_command(command_id) else {
-            return Ok(());
+#[tonic::async_trait]
+impl WalManagerService for MetaGrpcService {
+    async fn create_raft_group(
+        &self,
+        request: Request<CreateRaftGroupRequest>,
+    ) -> Result<Response<CreateRaftGroupResponse>, Status> {
+        self.ensure_leader().await?;
+        let request = request.into_inner();
+        let _guard = self.state.wal_mutation_lock.lock().await;
+
+        let raft_group_id = if request.raft_group_id == 0 {
+            self.state_machine().next_wal_raft_group_id()
+        } else {
+            request.raft_group_id
         };
-        if record.target_node_id != reporter_node_id {
-            anyhow::bail!(
-                "scheduler command {} belongs to node {}, not reporter {}",
-                command_id,
-                record.target_node_id,
-                reporter_node_id
-            );
-        }
-        self.propose_command(MetaCommand::AckSchedulerCommand {
-            command_id,
-            acked_at_ts: now_ts(),
-        })
-        .await
+        let replicas = request
+            .replicas
+            .into_iter()
+            .map(|replica| WalRaftReplica {
+                node_id: replica.node_id,
+                address: replica.address,
+            })
+            .collect::<Vec<_>>();
+
+        let create = self
+            .wal_scheduler()
+            .plan_create_group(
+                request.cluster_name.clone(),
+                raft_group_id,
+                request.epoch,
+                replicas,
+            )
+            .map_err(internal_status)?;
+        let _creating_group = self
+            .propose_and_get_group(create, &request.cluster_name, raft_group_id)
+            .await
+            .map_err(internal_status)?;
+
+        let activate = self
+            .wal_scheduler()
+            .plan_activate_group(
+                request.cluster_name.clone(),
+                raft_group_id,
+                request.epoch + 1,
+            )
+            .map_err(internal_status)?;
+        let group = self
+            .propose_and_get_group(activate, &request.cluster_name, raft_group_id)
+            .await
+            .map_err(internal_status)?;
+
+        Ok(Response::new(CreateRaftGroupResponse {
+            result: Some(MutationResult {
+                accepted: true,
+                message: format!(
+                    "created wal raft group {} in cluster {}",
+                    raft_group_id, request.cluster_name
+                ),
+            }),
+            group: Some(Self::map_wal_group(group)),
+        }))
     }
 
-    async fn apply_scheduler_completion(
+    async fn delete_raft_group(
         &self,
-        reporter_node_id: u64,
-        command_id: u64,
-    ) -> Result<()> {
-        let Some(record) = self.state_machine().scheduler_command(command_id) else {
-            return Ok(());
-        };
-        if record.target_node_id != reporter_node_id {
-            anyhow::bail!(
-                "scheduler command {} belongs to node {}, not reporter {}",
-                command_id,
-                record.target_node_id,
-                reporter_node_id
-            );
-        }
-
-        match record.command.kind {
-            SchedulerCommandKind::DropTablet => {}
-            SchedulerCommandKind::LoadTablet => {
-                let route = self
-                    .state_machine()
-                    .route(record.command.tablet_id)
-                    .with_context(|| {
-                        format!(
-                            "tablet route {} not found for completion",
-                            record.command.tablet_id
-                        )
-                    })?;
-                if route.epoch < record.command.epoch {
-                    anyhow::bail!(
-                        "tablet {} route epoch {} is behind completed command epoch {}",
-                        record.command.tablet_id,
-                        route.epoch,
-                        record.command.epoch
-                    );
-                }
-
-                if route.leader_cache_node_id == 0 && route.epoch == record.command.epoch {
-                    let command = self
-                        .scheduler()
-                        .complete_migration(record.command.tablet_id, reporter_node_id)?;
-                    self.propose_command(command).await?;
-                } else if route.leader_cache_node_id != reporter_node_id {
-                    anyhow::bail!(
-                        "tablet {} route leader {} does not match completed load target {}",
-                        record.command.tablet_id,
-                        route.leader_cache_node_id,
-                        reporter_node_id
-                    );
-                }
-            }
-        }
-
-        self.propose_command(MetaCommand::CompleteSchedulerCommand {
-            command_id,
-            completed_at_ts: now_ts(),
+        request: Request<DeleteRaftGroupRequest>,
+    ) -> Result<Response<DeleteRaftGroupResponse>, Status> {
+        self.ensure_leader().await?;
+        let request = request.into_inner();
+        let _guard = self.state.wal_mutation_lock.lock().await;
+        self.propose_command(MetaCommand::DeleteWalRaftGroup {
+            cluster_name: request.cluster_name.clone(),
+            raft_group_id: request.raft_group_id,
+            epoch: request.epoch,
         })
         .await
+        .map_err(internal_status)?;
+
+        Ok(Response::new(DeleteRaftGroupResponse {
+            result: Some(MutationResult {
+                accepted: true,
+                message: format!(
+                    "deleted wal raft group {} in cluster {}",
+                    request.raft_group_id, request.cluster_name
+                ),
+            }),
+        }))
     }
 
-    async fn apply_scheduler_failure(
+    async fn assign_stream(
         &self,
-        reporter_node_id: u64,
-        command_id: u64,
-        reason: String,
-    ) -> Result<()> {
-        let Some(record) = self.state_machine().scheduler_command(command_id) else {
-            return Ok(());
+        request: Request<AssignStreamRequest>,
+    ) -> Result<Response<AssignStreamResponse>, Status> {
+        self.ensure_leader().await?;
+        let request = request.into_inner();
+        let _guard = self.state.wal_mutation_lock.lock().await;
+
+        let stream_id = if request.stream_id == 0 {
+            self.state_machine().next_stream_id()
+        } else {
+            request.stream_id
         };
-        if record.target_node_id != reporter_node_id {
-            anyhow::bail!(
-                "scheduler command {} belongs to node {}, not reporter {}",
-                command_id,
-                record.target_node_id,
-                reporter_node_id
-            );
+        let raft_group_id = if request.raft_group_id == 0 {
+            self.wal_scheduler()
+                .pick_group_for_stream(&request.cluster_name)
+                .map_err(internal_status)?
+                .raft_group_id
+        } else {
+            request.raft_group_id
+        };
+        let assignment = self
+            .propose_and_get_assignment(
+                MetaCommand::AssignStream {
+                    cluster_name: request.cluster_name.clone(),
+                    stream_id,
+                    raft_group_id,
+                    epoch: request.assignment_epoch,
+                    state: StreamAssignmentState::Assigned,
+                },
+                &request.cluster_name,
+                stream_id,
+            )
+            .await
+            .map_err(internal_status)?;
+
+        Ok(Response::new(AssignStreamResponse {
+            result: Some(MutationResult {
+                accepted: true,
+                message: format!(
+                    "assigned stream {} to wal raft group {}",
+                    stream_id, raft_group_id
+                ),
+            }),
+            assignment: Some(Self::map_stream_assignment(assignment)),
+        }))
+    }
+
+    async fn reassign_stream(
+        &self,
+        request: Request<ReassignStreamRequest>,
+    ) -> Result<Response<ReassignStreamResponse>, Status> {
+        self.ensure_leader().await?;
+        let request = request.into_inner();
+        let _guard = self.state.wal_mutation_lock.lock().await;
+
+        let assignment = self
+            .state_machine()
+            .stream_assignment(&request.cluster_name, request.stream_id)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "stream {} not found in cluster {}",
+                    request.stream_id, request.cluster_name
+                ))
+            })?;
+        if assignment.raft_group_id != request.source_raft_group_id {
+            return Err(Status::failed_precondition(format!(
+                "stream {} is assigned to group {}, not {}",
+                request.stream_id, assignment.raft_group_id, request.source_raft_group_id
+            )));
         }
-        if reason.trim().is_empty() {
-            anyhow::bail!("scheduler command {} failure reason is empty", command_id);
+
+        let target_raft_group_id = if request.target_raft_group_id == 0 {
+            self.wal_scheduler()
+                .pick_reassignment_target(&request.cluster_name, request.source_raft_group_id)
+                .map_err(internal_status)?
+                .raft_group_id
+        } else {
+            request.target_raft_group_id
+        };
+        let assignment = self
+            .propose_and_get_assignment(
+                MetaCommand::AssignStream {
+                    cluster_name: request.cluster_name.clone(),
+                    stream_id: request.stream_id,
+                    raft_group_id: target_raft_group_id,
+                    epoch: request.assignment_epoch,
+                    state: StreamAssignmentState::Assigned,
+                },
+                &request.cluster_name,
+                request.stream_id,
+            )
+            .await
+            .map_err(internal_status)?;
+
+        Ok(Response::new(ReassignStreamResponse {
+            result: Some(MutationResult {
+                accepted: true,
+                message: format!(
+                    "reassigned stream {} from wal raft group {} to {}",
+                    request.stream_id, request.source_raft_group_id, target_raft_group_id
+                ),
+            }),
+            assignment: Some(Self::map_stream_assignment(assignment)),
+        }))
+    }
+
+    async fn unassign_stream(
+        &self,
+        request: Request<UnassignStreamRequest>,
+    ) -> Result<Response<UnassignStreamResponse>, Status> {
+        self.ensure_leader().await?;
+        let request = request.into_inner();
+        let _guard = self.state.wal_mutation_lock.lock().await;
+
+        let assignment = self
+            .state_machine()
+            .stream_assignment(&request.cluster_name, request.stream_id)
+            .ok_or_else(|| {
+                Status::not_found(format!(
+                    "stream {} not found in cluster {}",
+                    request.stream_id, request.cluster_name
+                ))
+            })?;
+        if assignment.raft_group_id != request.raft_group_id {
+            return Err(Status::failed_precondition(format!(
+                "stream {} is assigned to group {}, not {}",
+                request.stream_id, assignment.raft_group_id, request.raft_group_id
+            )));
         }
-        self.propose_command(MetaCommand::FailSchedulerCommand {
-            command_id,
-            failed_at_ts: now_ts(),
-            reason,
+        self.propose_command(MetaCommand::UnassignStream {
+            cluster_name: request.cluster_name.clone(),
+            stream_id: request.stream_id,
+            epoch: request.assignment_epoch,
         })
         .await
+        .map_err(internal_status)?;
+
+        Ok(Response::new(UnassignStreamResponse {
+            result: Some(MutationResult {
+                accepted: true,
+                message: format!(
+                    "unassigned stream {} from wal raft group {}",
+                    request.stream_id, request.raft_group_id
+                ),
+            }),
+        }))
+    }
+
+    async fn get_raft_group(
+        &self,
+        request: Request<GetRaftGroupRequest>,
+    ) -> Result<Response<GetRaftGroupResponse>, Status> {
+        self.state
+            .raft
+            .read_index()
+            .await
+            .map_err(internal_status)?;
+        let request = request.into_inner();
+        let group = self
+            .state_machine()
+            .wal_raft_group(&request.cluster_name, request.raft_group_id);
+        Ok(Response::new(GetRaftGroupResponse {
+            found: group.is_some(),
+            group: group.map(Self::map_wal_group),
+        }))
+    }
+
+    async fn list_raft_groups(
+        &self,
+        request: Request<ListRaftGroupsRequest>,
+    ) -> Result<Response<ListRaftGroupsResponse>, Status> {
+        self.state
+            .raft
+            .read_index()
+            .await
+            .map_err(internal_status)?;
+        let request = request.into_inner();
+        Ok(Response::new(ListRaftGroupsResponse {
+            groups: self
+                .state_machine()
+                .wal_raft_groups(&request.cluster_name)
+                .into_iter()
+                .map(Self::map_wal_group)
+                .collect(),
+        }))
+    }
+
+    async fn get_stream_assignment(
+        &self,
+        request: Request<GetStreamAssignmentRequest>,
+    ) -> Result<Response<GetStreamAssignmentResponse>, Status> {
+        self.state
+            .raft
+            .read_index()
+            .await
+            .map_err(internal_status)?;
+        let request = request.into_inner();
+        let assignment = self
+            .state_machine()
+            .stream_assignment(&request.cluster_name, request.stream_id);
+        Ok(Response::new(GetStreamAssignmentResponse {
+            found: assignment.is_some(),
+            assignment: assignment.map(Self::map_stream_assignment),
+        }))
+    }
+
+    async fn list_stream_assignments(
+        &self,
+        request: Request<ListStreamAssignmentsRequest>,
+    ) -> Result<Response<ListStreamAssignmentsResponse>, Status> {
+        self.state
+            .raft
+            .read_index()
+            .await
+            .map_err(internal_status)?;
+        let request = request.into_inner();
+        let raft_group_id = (request.raft_group_id != 0).then_some(request.raft_group_id);
+        Ok(Response::new(ListStreamAssignmentsResponse {
+            assignments: self
+                .state_machine()
+                .stream_assignments(&request.cluster_name, raft_group_id)
+                .into_iter()
+                .map(Self::map_stream_assignment)
+                .collect(),
+        }))
     }
 }
 

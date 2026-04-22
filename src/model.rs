@@ -23,6 +23,14 @@ pub struct ServerNode {
     pub cpu_usage: f64,
     pub memory_usage: f64,
     pub disk_free_gb: f64,
+    pub wal_server_info: Option<WalServerInfo>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalServerInfo {
+    pub raft_group_count: u64,
+    pub max_raft_group_count: u64,
+    pub raft_group_ids: Vec<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -31,6 +39,49 @@ pub struct TabletRoute {
     pub leader_cache_node_id: u64,
     pub wal_replica_node_ids: Vec<u64>,
     pub epoch: u64,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WalRaftGroupState {
+    Creating,
+    Active,
+    Reconfiguring,
+    Deleting,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalRaftReplica {
+    pub node_id: u64,
+    pub address: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WalRaftGroup {
+    pub cluster_name: String,
+    pub raft_group_id: u64,
+    pub epoch: u64,
+    pub replicas: Vec<WalRaftReplica>,
+    pub leader_node_id: u64,
+    pub state: WalRaftGroupState,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StreamAssignmentState {
+    Assigning,
+    Assigned,
+    Moving,
+    Unassigned,
+    Error,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StreamAssignment {
+    pub cluster_name: String,
+    pub stream_id: u64,
+    pub raft_group_id: u64,
+    pub epoch: u64,
+    pub state: StreamAssignmentState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

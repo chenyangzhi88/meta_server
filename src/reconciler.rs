@@ -45,7 +45,7 @@ impl MetaReconciler {
     }
 
     pub async fn reconcile_once(&self) -> Result<()> {
-        if self.raft.state_role().await != StateRole::Leader {
+        if self.raft.state_role().await != StateRole::Leader && self.raft.voter_count().await > 1 {
             return Ok(());
         }
 
@@ -127,6 +127,9 @@ impl MetaReconciler {
     }
 
     async fn propose_command(&self, command: MetaCommand) -> Result<()> {
+        if self.raft.voter_count().await == 1 {
+            return self.state_machine.apply(command);
+        }
         let payload = serde_json::to_vec(&command).context("encode reconciler meta command")?;
         self.raft.propose(payload).await
     }
@@ -177,6 +180,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        raft.spawn_tick_task(Duration::from_millis(100));
+        raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         for command in [
             MetaCommand::UpsertNode(ServerNode {
@@ -188,6 +194,7 @@ mod tests {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 10.0,
+                wal_server_info: None,
             }),
             MetaCommand::UpsertNode(ServerNode {
                 node_id: 12,
@@ -198,6 +205,7 @@ mod tests {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 10.0,
+                wal_server_info: None,
             }),
             MetaCommand::UpsertTabletRoute(TabletRoute {
                 tablet_id: 100,
@@ -206,9 +214,7 @@ mod tests {
                 epoch: 7,
             }),
         ] {
-            raft.propose(serde_json::to_vec(&command).unwrap())
-                .await
-                .unwrap();
+            state_machine.apply(command).unwrap();
         }
 
         let reconciler = MetaReconciler::new(raft, state_machine.clone(), Duration::from_secs(5));
@@ -237,6 +243,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        raft.spawn_tick_task(Duration::from_millis(100));
+        raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         for command in [
             MetaCommand::UpsertTabletRoute(TabletRoute {
@@ -262,9 +271,7 @@ mod tests {
                 reason: "wal replica unavailable".to_string(),
             },
         ] {
-            raft.propose(serde_json::to_vec(&command).unwrap())
-                .await
-                .unwrap();
+            state_machine.apply(command).unwrap();
         }
 
         let reconciler = MetaReconciler::new(raft, state_machine.clone(), Duration::from_secs(5));

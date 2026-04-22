@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::model::{SchedulerCommandSpec, ServerNode, TabletRoute};
+use crate::model::{
+    SchedulerCommandSpec, ServerNode, StreamAssignmentState, TabletRoute, WalRaftGroupState,
+};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum MetaCommand {
@@ -44,5 +46,37 @@ pub enum MetaCommand {
     },
     ClearTabletOperatorAlert {
         tablet_id: u64,
+    },
+    CreateWalRaftGroup {
+        cluster_name: String,
+        raft_group_id: u64,
+        epoch: u64,
+        replicas: Vec<(u64, String)>,
+        leader_node_id: u64,
+        state: WalRaftGroupState,
+    },
+    UpdateWalRaftGroupState {
+        cluster_name: String,
+        raft_group_id: u64,
+        epoch: u64,
+        leader_node_id: Option<u64>,
+        state: WalRaftGroupState,
+    },
+    DeleteWalRaftGroup {
+        cluster_name: String,
+        raft_group_id: u64,
+        epoch: u64,
+    },
+    AssignStream {
+        cluster_name: String,
+        stream_id: u64,
+        raft_group_id: u64,
+        epoch: u64,
+        state: StreamAssignmentState,
+    },
+    UnassignStream {
+        cluster_name: String,
+        stream_id: u64,
+        epoch: u64,
     },
 }

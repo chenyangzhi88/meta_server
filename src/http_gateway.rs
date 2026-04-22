@@ -82,6 +82,14 @@ struct NodeView {
     cpu_usage: f64,
     memory_usage: f64,
     disk_free_gb: f64,
+    wal_server_info: Option<WalServerInfoView>,
+}
+
+#[derive(Serialize)]
+struct WalServerInfoView {
+    raft_group_count: u64,
+    max_raft_group_count: u64,
+    raft_group_ids: Vec<u64>,
 }
 
 #[derive(Serialize)]
@@ -212,6 +220,11 @@ async fn list_nodes(
             cpu_usage: node.cpu_usage,
             memory_usage: node.memory_usage,
             disk_free_gb: node.disk_free_gb,
+            wal_server_info: node.wal_server_info.map(|info| WalServerInfoView {
+                raft_group_count: info.raft_group_count,
+                max_raft_group_count: info.max_raft_group_count,
+                raft_group_ids: info.raft_group_ids,
+            }),
         })
         .collect::<Vec<_>>();
     nodes.sort_by_key(|node| node.node_id);
@@ -524,6 +537,9 @@ async fn clear_tablet_alert(
 async fn ensure_linearized(
     state: &HttpGatewayState,
 ) -> Result<(), (axum::http::StatusCode, Json<ApiError>)> {
+    if state.shared.meta_voters.len() == 1 {
+        return Ok(());
+    }
     state.shared.raft.read_index().await.map_err(|error| {
         (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -662,11 +678,13 @@ async fn fetch_remote_meta_cluster_node_view(
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use axum::body::Body;
     use axum::http::Request;
     use serde_json::Value;
     use tokio::net::TcpListener;
+    use tokio::sync::Mutex;
     use tokio::sync::oneshot;
     use tokio_stream::wrappers::TcpListenerStream;
     use tonic::transport::Server;
@@ -692,6 +710,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        raft.spawn_tick_task(Duration::from_millis(100));
+        raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let app = router(Arc::new(MetaServiceState {
             raft,
@@ -702,6 +723,7 @@ mod tests {
             meta_peers: [(1_u64, "127.0.0.1:7001".to_string())]
                 .into_iter()
                 .collect(),
+            wal_mutation_lock: Arc::new(Mutex::new(())),
         }));
 
         let response = app
@@ -733,6 +755,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        raft.spawn_tick_task(Duration::from_millis(100));
+        raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let app = router(Arc::new(MetaServiceState {
             raft,
@@ -747,6 +772,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            wal_mutation_lock: Arc::new(Mutex::new(())),
         }));
 
         let response = app
@@ -781,6 +807,9 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        raft.spawn_tick_task(Duration::from_millis(100));
+        raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
         let remote_temp = tempfile::tempdir().unwrap();
         let remote_storage = MetaStorage::open(remote_temp.path()).unwrap();
@@ -795,6 +824,9 @@ mod tests {
             .await
             .unwrap(),
         );
+        remote_raft.spawn_tick_task(Duration::from_millis(100));
+        remote_raft.campaign().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
         let remote_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let remote_addr = remote_listener.local_addr().unwrap();
         let remote_service = MetaGrpcService::new(MetaServiceState {
@@ -809,6 +841,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            wal_mutation_lock: Arc::new(Mutex::new(())),
         });
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         let _remote_server = tokio::spawn(async move {
@@ -834,6 +867,7 @@ mod tests {
             ]
             .into_iter()
             .collect(),
+            wal_mutation_lock: Arc::new(Mutex::new(())),
         }));
 
         let response = app

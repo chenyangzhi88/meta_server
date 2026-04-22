@@ -20,8 +20,10 @@ use meta_server::raft_node::RaftNodeFacade;
 use meta_server::scheduler::TabletScheduler;
 use meta_server::state_machine::MetaStateMachine;
 use meta_server::storage::MetaStorage;
+use meta_server::wal_pb::wal_manager_service_server::WalManagerServiceServer;
 use tempfile::tempdir;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -38,6 +40,7 @@ fn cache_node(node_id: u64, address: &str) -> NodeInfo {
         cpu_usage: 0.2,
         memory_usage: 0.3,
         disk_free_gb: 120.0,
+        wal_server_info: None,
     }
 }
 
@@ -86,12 +89,14 @@ async fn start_single_node() -> TestNode {
         meta_node_id: 1,
         meta_voters: vec![1],
         meta_peers: [(1_u64, addr.to_string())].into_iter().collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let server_handle = tokio::spawn(async move {
         Server::builder()
             .add_service(MetaServiceServer::new(service.clone()))
+            .add_service(WalManagerServiceServer::new(service.clone()))
             .add_service(RaftTransportServer::new(service))
             .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                 let _ = shutdown_rx.await;
@@ -162,6 +167,7 @@ async fn start_three_node_cluster() -> Vec<TestNode> {
                 .copied()
                 .map(|peer_id| (peer_id, addresses[(peer_id - 1) as usize].to_string()))
                 .collect(),
+            wal_mutation_lock: Arc::new(Mutex::new(())),
         });
 
         let listener = listeners.remove(0);
@@ -169,6 +175,7 @@ async fn start_three_node_cluster() -> Vec<TestNode> {
         let server_handle = tokio::spawn(async move {
             Server::builder()
                 .add_service(MetaServiceServer::new(service.clone()))
+                .add_service(WalManagerServiceServer::new(service.clone()))
                 .add_service(RaftTransportServer::new(service))
                 .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async {
                     let _ = shutdown_rx.await;
@@ -237,6 +244,7 @@ async fn heartbeat_route_and_migration_flow_work() {
         meta_peers: [(1_u64, node.advertised_addr.clone())]
             .into_iter()
             .collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
 
     let heartbeat = service
@@ -405,6 +413,7 @@ async fn meta_cluster_status_rpc_reports_local_raft_view() {
         meta_peers: [(1_u64, "127.0.0.1:7001".to_string())]
             .into_iter()
             .collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
 
     let response = service
@@ -497,6 +506,7 @@ async fn wal_replay_restores_scheduler_command_ids() {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 10.0,
+                wal_server_info: None,
             }),
             MetaCommand::UpsertNode(meta_server::model::ServerNode {
                 node_id: 12,
@@ -507,6 +517,7 @@ async fn wal_replay_restores_scheduler_command_ids() {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 10.0,
+                wal_server_info: None,
             }),
             MetaCommand::UpsertTabletRoute(TabletRoute {
                 tablet_id: 100,
@@ -596,6 +607,7 @@ async fn heartbeat_failure_marks_command_failed_without_route_change() {
         meta_peers: [(1_u64, node.advertised_addr.clone())]
             .into_iter()
             .collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
 
     service
@@ -712,6 +724,7 @@ async fn failed_load_triggers_operator_alert_after_reconcile() {
         meta_peers: [(1_u64, "127.0.0.1:7001".to_string())]
             .into_iter()
             .collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
 
     service
@@ -797,6 +810,7 @@ async fn observability_queries_match_state_machine_views() {
         meta_peers: [(1_u64, node.advertised_addr.clone())]
             .into_iter()
             .collect(),
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
     let reconciler = meta_server::reconciler::MetaReconciler::new(
         node.raft.clone(),
@@ -833,6 +847,7 @@ async fn observability_queries_match_state_machine_views() {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 200.0,
+                wal_server_info: None,
             }),
             acked_command_ids: vec![],
             completed_command_ids: vec![],
@@ -1013,6 +1028,7 @@ async fn multi_node_observability_queries_match_replicated_state() {
                 cpu_usage: 0.1,
                 memory_usage: 0.2,
                 disk_free_gb: 320.0,
+                wal_server_info: None,
             }),
             acked_command_ids: vec![],
             completed_command_ids: vec![],

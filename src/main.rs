@@ -14,6 +14,8 @@ use meta_server::raft_node::RaftNodeFacade;
 use meta_server::reconciler::MetaReconciler;
 use meta_server::state_machine::MetaStateMachine;
 use meta_server::storage::MetaStorage;
+use meta_server::wal_pb::wal_manager_service_server::WalManagerServiceServer;
+use tokio::sync::Mutex;
 use tonic::transport::Server;
 
 #[tokio::main]
@@ -79,6 +81,7 @@ async fn main() -> Result<()> {
             );
             peers.into_iter().collect::<HashMap<_, _>>()
         },
+        wal_mutation_lock: Arc::new(Mutex::new(())),
     });
     let reconciler = MetaReconciler::new(
         service.state().raft.clone(),
@@ -100,6 +103,7 @@ async fn main() -> Result<()> {
     let addr = config.listen_addr.parse()?;
     Server::builder()
         .add_service(MetaServiceServer::new(service.clone()))
+        .add_service(WalManagerServiceServer::new(service.clone()))
         .add_service(RaftTransportServer::new(service))
         .serve(addr)
         .await?;
